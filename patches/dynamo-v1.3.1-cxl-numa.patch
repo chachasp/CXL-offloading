@@ -1,0 +1,354 @@
+diff --git a/lib/llm/src/block_manager/storage/cuda.rs b/lib/llm/src/block_manager/storage/cuda.rs
+index 544be89..53caec2 100644
+--- a/lib/llm/src/block_manager/storage/cuda.rs
++++ b/lib/llm/src/block_manager/storage/cuda.rs
+@@ -307,8 +307,61 @@ impl PinnedAllocator {
+
+ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
+     fn allocate(&self, size: usize) -> Result<PinnedStorage, StorageError> {
+-        PinnedStorage::new_for_device(size, Some(self.ctx.cu_device() as u32))
++        match cxl_numa_node_from_env()? {
++            Some(node) => dynamo_memory::PinnedStorage::new_cxl_numa(
++                size,
++                self.ctx.cu_device() as u32,
++                node,
++            )
++            .map(|inner| PinnedStorage {
++                inner,
++                handles: RegistrationHandles::new(),
++            })
++            .map_err(StorageError::from),
++            None => PinnedStorage::new_for_device(size, Some(self.ctx.cu_device() as u32)),
++        }
++    }
++}
++
++#[cfg(target_os = "linux")]
++fn cxl_numa_node_from_env() -> Result<Option<u32>, StorageError> {
++    const VARIABLE: &str = "DYN_KVBM_CXL_NUMA_NODE";
++    let Ok(value) = std::env::var(VARIABLE) else {
++        return Ok(None);
++    };
++    let value = value.trim();
++    if value.is_empty() {
++        return Err(StorageError::AllocationFailed(format!(
++            "{VARIABLE} is set but empty"
++        )));
++    }
++    let node = value.parse::<u32>().map_err(|_| {
++        StorageError::AllocationFailed(format!(
++            "{VARIABLE} must be an explicit numeric memory-only NUMA node, got {value:?}"
++        ))
++    })?;
++    let node_path = format!("/sys/devices/system/node/node{node}");
++    let cpulist = std::fs::read_to_string(format!("{node_path}/cpulist")).map_err(|error| {
++        StorageError::AllocationFailed(format!(
++            "cannot read {node_path}/cpulist for CXL validation: {error}"
++        ))
++    })?;
++    if !cpulist.trim().is_empty() {
++        return Err(StorageError::AllocationFailed(format!(
++            "NUMA node {node} owns CPUs ({cpulist:?}); strict CXL-only mode requires a memory-only node with an empty cpulist"
++        )));
++    }
++    Ok(Some(node))
++}
++
++#[cfg(not(target_os = "linux"))]
++fn cxl_numa_node_from_env() -> Result<Option<u32>, StorageError> {
++    if std::env::var_os("DYN_KVBM_CXL_NUMA_NODE").is_some() {
++        return Err(StorageError::InvalidConfig(
++            "DYN_KVBM_CXL_NUMA_NODE is supported only on Linux".into(),
++        ));
+     }
++    Ok(None)
+ }
+
+ /// An enum indicating the type of device storage.
+diff --git a/lib/memory/src/pinned.rs b/lib/memory/src/pinned.rs
+index 54a794f..5a01aa6 100644
+--- a/lib/memory/src/pinned.rs
++++ b/lib/memory/src/pinned.rs
+@@ -8,6 +8,13 @@ use cudarc::driver::CudaContext;
+ use std::any::Any;
+ use std::sync::Arc;
+
++#[derive(Debug)]
++enum PinnedBacking {
++    CudaHostAlloc,
++    #[cfg(target_os = "linux")]
++    CxlNumaMmap,
++}
++
+ /// Whether to use write-combined pinned allocations.
+ ///
+ /// Probed once at first use: returns `false` if `DYN_KVBM_DISABLE_WRITE_COMBINED`
+@@ -79,6 +86,8 @@ pub struct PinnedStorage {
+     len: usize,
+     /// CUDA context used for allocation and deallocation.
+     ctx: Arc<CudaContext>,
++    /// Allocation API used to create `ptr`.
++    backing: PinnedBacking,
+ }
+
+ unsafe impl Send for PinnedStorage {}
+@@ -168,7 +177,104 @@ impl PinnedStorage {
+             }
+         };
+
+-        Ok(Self { ptr, len, ctx })
++        Ok(Self {
++            ptr,
++            len,
++            ctx,
++            backing: PinnedBacking::CudaHostAlloc,
++        })
++    }
++
++    /// Allocate CUDA-registered host memory strictly on one Linux NUMA node.
++    ///
++    /// This path is intended for KVBM's G2 payload on a CXL memory-only NUMA
++    /// node. It uses anonymous `mmap`, applies `MPOL_BIND`, faults every page,
++    /// verifies every page with `move_pages`, and only then registers the
++    /// region with CUDA. It never falls back to another NUMA node.
++    #[cfg(target_os = "linux")]
++    pub fn new_cxl_numa(len: usize, device_id: u32, node: u32) -> Result<Self> {
++        if len == 0 {
++            return Err(StorageError::AllocationFailed(
++                "zero-sized CXL NUMA allocations are not supported".into(),
++            ));
++        }
++
++        let ctx = crate::device::cuda_context(device_id)?;
++        unsafe {
++            ctx.bind_to_thread().map_err(StorageError::Cuda)?;
++        }
++
++        let ptr = unsafe {
++            libc::mmap(
++                std::ptr::null_mut(),
++                len,
++                libc::PROT_READ | libc::PROT_WRITE,
++                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
++                -1,
++                0,
++            )
++        };
++        if ptr == libc::MAP_FAILED {
++            return Err(StorageError::AllocationFailed(format!(
++                "CXL mmap({len} bytes) failed: {}",
++                std::io::Error::last_os_error()
++            )));
++        }
++
++        let cleanup = |registered: bool| unsafe {
++            if registered {
++                let _ = cudarc::driver::sys::cuMemHostUnregister(ptr);
++            }
++            let _ = libc::munmap(ptr, len);
++        };
++
++        if let Err(error) = bind_range_to_node(ptr, len, node) {
++            cleanup(false);
++            return Err(StorageError::AllocationFailed(error));
++        }
++
++        unsafe { fault_all_pages(ptr.cast::<u8>(), len) };
++
++        if let Err(error) = verify_all_pages_on_node(ptr.cast::<u8>(), len, node) {
++            cleanup(false);
++            return Err(StorageError::AllocationFailed(error));
++        }
++
++        let flags = cudarc::driver::sys::CU_MEMHOSTREGISTER_PORTABLE
++            | cudarc::driver::sys::CU_MEMHOSTREGISTER_DEVICEMAP;
++        let register_result = unsafe {
++            cudarc::driver::sys::cuMemHostRegister_v2(ptr, len, flags)
++        };
++        if let Err(error) = register_result.result() {
++            cleanup(false);
++            return Err(StorageError::RegistrationFailed(format!(
++                "CUDA could not register the CXL NUMA range on node {node}: {error:?}. \
++                 Check IPC_LOCK/memlock and whether the CXL zone permits long-term pinning"
++            )));
++        }
++
++        tracing::info!(
++            target: "kvbm_cxl",
++            cxl_numa_node = node,
++            bytes = len,
++            address = format_args!("{ptr:p}"),
++            "allocated and CUDA-registered strict CXL NUMA G2 storage"
++        );
++
++        Ok(Self {
++            ptr: ptr as usize,
++            len,
++            ctx,
++            backing: PinnedBacking::CxlNumaMmap,
++        })
++    }
++
++    /// Reject CXL NUMA allocation on non-Linux targets.
++    #[cfg(not(target_os = "linux"))]
++    pub fn new_cxl_numa(_len: usize, _device_id: u32, _node: u32) -> Result<Self> {
++        Err(StorageError::Unsupported(
++            "CXL NUMA allocation is supported only on Linux".into(),
++        ))
+     }
+
+     /// Get a pointer to the underlying memory.
+@@ -200,11 +306,151 @@ impl Drop for PinnedStorage {
+             tracing::debug!("failed to bind CUDA context for free: {e}");
+         }
+         unsafe {
+-            if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
+-                tracing::debug!("failed to free pinned memory: {e}");
++            match self.backing {
++                PinnedBacking::CudaHostAlloc => {
++                    if let Err(e) = cudarc::driver::result::free_host(self.ptr as _) {
++                        tracing::debug!("failed to free pinned memory: {e}");
++                    }
++                }
++                #[cfg(target_os = "linux")]
++                PinnedBacking::CxlNumaMmap => {
++                    if let Err(e) = cudarc::driver::sys::cuMemHostUnregister(self.ptr as _).result()
++                    {
++                        tracing::warn!("failed to unregister CXL NUMA memory from CUDA: {e:?}");
++                    }
++                    if libc::munmap(self.ptr as _, self.len) != 0 {
++                        tracing::warn!(
++                            "failed to unmap CXL NUMA memory: {}",
++                            std::io::Error::last_os_error()
++                        );
++                    }
++                }
+             }
++        }
++    }
++}
++
++#[cfg(target_os = "linux")]
++const MPOL_BIND: libc::c_int = 2;
++
++#[cfg(target_os = "linux")]
++unsafe fn mbind(
++    addr: *mut libc::c_void,
++    len: usize,
++    node: u32,
++) -> std::result::Result<(), String> {
++    let bits_per_word = usize::BITS as usize;
++    let words = (node as usize / bits_per_word) + 1;
++    let mut nodemask = vec![0usize; words];
++    nodemask[node as usize / bits_per_word] |= 1usize << (node as usize % bits_per_word);
++    let maxnode = words * bits_per_word;
++
++    let rc = unsafe {
++        libc::syscall(
++            libc::SYS_mbind,
++            addr,
++            len,
++            MPOL_BIND,
++            nodemask.as_ptr(),
++            maxnode,
++            0usize,
++        )
++    };
++    if rc != 0 {
++        return Err(format!(
++            "mbind(MPOL_BIND) to NUMA node {node} failed: {}",
++            std::io::Error::last_os_error()
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(target_os = "linux")]
++fn bind_range_to_node(
++    addr: *mut libc::c_void,
++    len: usize,
++    node: u32,
++) -> std::result::Result<(), String> {
++    let node_path = format!("/sys/devices/system/node/node{node}");
++    if !std::path::Path::new(&node_path).is_dir() {
++        return Err(format!("configured CXL NUMA node {node} does not exist"));
++    }
++    unsafe { mbind(addr, len, node) }
++}
++
++#[cfg(target_os = "linux")]
++unsafe fn fault_all_pages(ptr: *mut u8, len: usize) {
++    let page_size = match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
++        value if value > 0 => value as usize,
++        _ => 4096,
++    };
++    let mut offset = 0usize;
++    while offset < len {
++        unsafe { std::ptr::write_volatile(ptr.add(offset), 0) };
++        offset = offset.saturating_add(page_size);
++    }
++    if !len.is_multiple_of(page_size) {
++        unsafe { std::ptr::write_volatile(ptr.add(len - 1), 0) };
++    }
++}
++
++#[cfg(target_os = "linux")]
++fn verify_all_pages_on_node(
++    ptr: *mut u8,
++    len: usize,
++    expected_node: u32,
++) -> std::result::Result<(), String> {
++    let page_size = match unsafe { libc::sysconf(libc::_SC_PAGESIZE) } {
++        value if value > 0 => value as usize,
++        _ => 4096,
++    };
++    let page_count = len.div_ceil(page_size);
++    const BATCH_PAGES: usize = 4096;
++    let mut first_bad: Option<(usize, i32)> = None;
++    let mut checked = 0usize;
++
++    while checked < page_count {
++        let count = (page_count - checked).min(BATCH_PAGES);
++        let mut pages = Vec::with_capacity(count);
++        for index in 0..count {
++            pages.push(unsafe { ptr.add((checked + index) * page_size) }.cast::<libc::c_void>());
++        }
++        let mut status = vec![-1i32; count];
++        let rc = unsafe {
++            libc::syscall(
++                libc::SYS_move_pages,
++                0,
++                count,
++                pages.as_ptr(),
++                std::ptr::null::<libc::c_int>(),
++                status.as_mut_ptr(),
++                0,
++            )
+         };
++        if rc < 0 {
++            return Err(format!(
++                "move_pages placement query failed after {checked} pages: {}",
++                std::io::Error::last_os_error()
++            ));
++        }
++        for (index, actual) in status.into_iter().enumerate() {
++            if actual != expected_node as i32 {
++                first_bad = Some((checked + index, actual));
++                break;
++            }
++        }
++        if first_bad.is_some() {
++            break;
++        }
++        checked += count;
++    }
++
++    if let Some((page, actual)) = first_bad {
++        return Err(format!(
++            "strict CXL placement failed: page {page} is on NUMA node/status {actual}, expected {expected_node}; DRAM fallback is forbidden"
++        ));
+     }
++    Ok(())
+ }
+
+ impl MemoryDescriptor for PinnedStorage {

@@ -1,0 +1,11 @@
+CXL-offloading
+Copyright 2026 CXL-offloading contributors
+
+This project contains a patch for NVIDIA Dynamo/KVBM, which is licensed under
+Apache-2.0. The patch retains NVIDIA's existing SPDX copyright and license
+headers. NVIDIA Dynamo is not bundled in this repository; the build script
+fetches the exact upstream commit recorded in UPSTREAM.lock.
+
+NVIDIA, CUDA, Dynamo, Kubernetes, vLLM, Qwen and other names are trademarks of
+their respective owners. This experimental project is not an official NVIDIA
+release.

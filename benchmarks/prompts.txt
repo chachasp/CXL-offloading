@@ -1,0 +1,3 @@
+CXL memory와 일반 DDR DRAM의 차이를 세 문장으로 설명해 주세요.
+KV Cache가 LLM inference의 TTFT와 ITL에 어떤 영향을 주는지 설명해 주세요.
+Kubernetes에서 memory request와 limit의 차이를 설명해 주세요.
