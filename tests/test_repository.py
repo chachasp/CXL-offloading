@@ -10,6 +10,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class RepositoryTests(unittest.TestCase):
+    def test_upstream_pin_is_dynamo_1_3_0(self) -> None:
+        lock = {}
+        for line in (ROOT / "UPSTREAM.lock").read_text(encoding="utf-8").splitlines():
+            key, value = line.split("=", 1)
+            lock[key] = value
+        self.assertEqual(lock["DYNAMO_TAG"], "v1.3.0")
+        self.assertEqual(lock["DYNAMO_COMMIT"], "8ce9e22f11576402102ea9d8b8e46233f5430a0d")
+        self.assertEqual(lock["KVBM_VERSION"], "1.3.0")
+        self.assertEqual(
+            lock["BASE_IMAGE"],
+            "nvcr.io/nvidia/ai-dynamo/vllm-runtime:1.3.0",
+        )
+        self.assertTrue((ROOT / "patches" / "dynamo-v1.3.0-cxl-numa.patch").is_file())
+
     def test_python_syntax(self) -> None:
         for path in list((ROOT / "scripts").glob("*.py")) + list((ROOT / "benchmarks").glob("*.py")):
             ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -30,7 +44,7 @@ class RepositoryTests(unittest.TestCase):
         self.assertNotIn("DYN_KVBM_DISK_CACHE_GB", text)
 
     def test_patch_has_strict_guards(self) -> None:
-        text = (ROOT / "patches" / "dynamo-v1.3.1-cxl-numa.patch").read_text(encoding="utf-8")
+        text = (ROOT / "patches" / "dynamo-v1.3.0-cxl-numa.patch").read_text(encoding="utf-8")
         for required in ("MPOL_BIND", "move_pages", "cuMemHostRegister_v2", "DRAM fallback is forbidden"):
             self.assertIn(required, text)
 

@@ -25,8 +25,8 @@ jobs:
           git clone --filter=blob:none "$DYNAMO_REPOSITORY" /tmp/dynamo
           git -C /tmp/dynamo fetch --depth 1 origin "$DYNAMO_COMMIT"
           git -C /tmp/dynamo checkout --detach "$DYNAMO_COMMIT"
-          git -C /tmp/dynamo apply --check "$GITHUB_WORKSPACE/patches/dynamo-v1.3.1-cxl-numa.patch"
-          git -C /tmp/dynamo apply "$GITHUB_WORKSPACE/patches/dynamo-v1.3.1-cxl-numa.patch"
+          git -C /tmp/dynamo apply --check "$GITHUB_WORKSPACE/patches/dynamo-v1.3.0-cxl-numa.patch"
+          git -C /tmp/dynamo apply "$GITHUB_WORKSPACE/patches/dynamo-v1.3.0-cxl-numa.patch"
           cargo fmt --manifest-path /tmp/dynamo/Cargo.toml --all -- --check
       - name: Detect committed secrets
         uses: gitleaks/gitleaks-action@v2

@@ -9,8 +9,8 @@
 
 ## Upstream 수정 지점
 
-기준은 Dynamo `v1.3.1` commit
-`a49702e4432e7fa43cbc88175bddb31604340f19`입니다.
+기준은 Dynamo `v1.3.0` commit
+`8ce9e22f11576402102ea9d8b8e46233f5430a0d`입니다.
 
 - `lib/llm/src/block_manager/storage/cuda.rs`
   - G2 host layout에서 쓰는 `PinnedAllocator::allocate`가

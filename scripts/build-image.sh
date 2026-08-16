@@ -21,7 +21,7 @@ git -C "$verify_dir" checkout --detach "$DYNAMO_COMMIT"
 git -C "$verify_dir" reset --hard "$DYNAMO_COMMIT"
 git -C "$verify_dir" clean -ffd
 test "$(git -C "$verify_dir" rev-parse HEAD)" = "$DYNAMO_COMMIT"
-git -C "$verify_dir" apply --check "$repo_root/patches/dynamo-v1.3.1-cxl-numa.patch"
+git -C "$verify_dir" apply --check "$repo_root/patches/dynamo-v1.3.0-cxl-numa.patch"
 
 echo "[2/3] Custom KVBM image를 빌드합니다: $image"
 docker build \

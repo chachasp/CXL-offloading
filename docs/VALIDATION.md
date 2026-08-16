@@ -4,7 +4,7 @@
 
 1. `preflight.sh`: CXL memory-only node, topology와 도구 확인
 2. `cxl_cuda_probe.py`: 64 MiB 전 page placement와 CUDA 등록 확인
-3. custom image import: `kvbm==1.3.1`
+3. custom image import: `kvbm==1.3.0`
 4. 64 GiB G2로 worker 시작과 allocator 성공 로그 확인
 5. deterministic correctness 비교
 6. 30분 stability test

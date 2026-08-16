@@ -1,6 +1,6 @@
 # KVBM + CXL NUMA KV Cache Offloading
 
-이 저장소는 NVIDIA Dynamo/KVBM v1.3.1의 G2 KV payload를 일반 DRAM이
+이 저장소는 NVIDIA Dynamo/KVBM v1.3.0의 G2 KV payload를 일반 DRAM이
 아니라 **System RAM으로 등록된 CXL memory-only NUMA node에만** 배치하는
 실험용 패치와 설치·검증 도구입니다.
 
@@ -35,8 +35,8 @@ CXL System RAM NUMA node (G2 KV payload)
 
 ## 고정된 버전
 
-- Dynamo/KVBM: `v1.3.1`, commit
-  `a49702e4432e7fa43cbc88175bddb31604340f19`
+- Dynamo/KVBM: `v1.3.0`, commit
+  `8ce9e22f11576402102ea9d8b8e46233f5430a0d`
 - vLLM: `0.23.0`
 - PyTorch/CUDA: `2.11.0+cu130` / CUDA `13.0`
 - 모델: `Qwen/Qwen3-30B-A3B-FP8`
@@ -87,7 +87,7 @@ sudo python3 scripts/cxl_cuda_probe.py --node <CXL_NODE> --size-mib 64
 ### 4. custom image 빌드와 registry push
 
 ```bash
-export IMAGE=<사내-registry>/dynamo-vllm-cxl:v1.3.1-1
+export IMAGE=<사내-registry>/dynamo-vllm-cxl:v1.3.0-1
 ./scripts/build-image.sh "$IMAGE"
 docker push "$IMAGE"
 ```
